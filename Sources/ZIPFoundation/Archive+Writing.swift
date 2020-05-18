@@ -110,9 +110,17 @@ extension Archive {
         let modDateTime = modificationDate.fileModificationDateTime
         defer { fflush(self.archiveFile) }
         do {
+            let alignSize = 64
+            let fileManager = FileManager.default
+            let fileSystemRepresentation = fileManager.fileSystemRepresentation(withPath: path)
+            let fileNameLength = Int(strlen(fileSystemRepresentation))
+            let dataOffset = localFileHeaderStart + LocalFileHeader.size + fileNameLength
+            let extraFieldLength = alignSize - (dataOffset % alignSize)
+            let extraData = Data(count: extraFieldLength)
+
             var localFileHeader = try self.writeLocalFileHeader(path: path, compressionMethod: compressionMethod,
                                                                 size: (uncompressedSize, 0), checksum: 0,
-                                                                modificationDateTime: modDateTime)
+                                                                modificationDateTime: modDateTime, extraData: extraData)
             let (written, checksum) = try self.writeEntry(localFileHeader: localFileHeader, type: type,
                                                           compressionMethod: compressionMethod, bufferSize: bufferSize,
                                                           progress: progress, provider: provider)
@@ -121,7 +129,7 @@ extension Archive {
             // Write the local file header a second time. Now with compressedSize (if applicable) and a valid checksum.
             localFileHeader = try self.writeLocalFileHeader(path: path, compressionMethod: compressionMethod,
                                                             size: (uncompressedSize, written),
-                                                            checksum: checksum, modificationDateTime: modDateTime)
+                                                            checksum: checksum, modificationDateTime: modDateTime, extraData: extraData)
             fseek(self.archiveFile, startOfCD, SEEK_SET)
             _ = try Data.write(chunk: existingCentralDirData, to: self.archiveFile)
             let permissions = permissions ?? (type == .directory ? defaultDirectoryPermissions :defaultFilePermissions)
@@ -149,13 +157,13 @@ extension Archive {
     ///   - progress: A progress object that can be used to track or cancel the remove operation.
     /// - Throws: An error if the `Entry` is malformed or the receiver is not writable.
     public func remove(_ entry: Entry, bufferSize: UInt32 = defaultReadChunkSize, progress: Progress? = nil) throws {
-		let manager = FileManager()
+        let manager = FileManager()
         let tempDir = self.uniqueTemporaryDirectoryURL()
         defer { try? manager.removeItem(at: tempDir) }
-		let uniqueString = ProcessInfo.processInfo.globallyUniqueString
-		let tempArchiveURL =  tempDir.appendingPathComponent(uniqueString)
+        let uniqueString = ProcessInfo.processInfo.globallyUniqueString
+        let tempArchiveURL =  tempDir.appendingPathComponent(uniqueString)
         do { try manager.createParentDirectoryStructure(for: tempArchiveURL) } catch {
-			throw ArchiveError.unwritableArchive }
+            throw ArchiveError.unwritableArchive }
         guard let tempArchive = Archive(url: tempArchiveURL, accessMode: .create) else {
             throw ArchiveError.unwritableArchive
         }
@@ -230,7 +238,11 @@ extension Archive {
     private func writeLocalFileHeader(path: String, compressionMethod: CompressionMethod,
                                       size: (uncompressed: UInt32, compressed: UInt32),
                                       checksum: CRC32,
-                                      modificationDateTime: (UInt16, UInt16)) throws -> LocalFileHeader {
+                                      modificationDateTime: (UInt16, UInt16),
+                                      extraData: Data = Data()) throws -> LocalFileHeader {
+        let fileManager = FileManager()
+        let fileSystemRepresentation = fileManager.fileSystemRepresentation(withPath: path)
+        let fileNameLength = Int(strlen(fileSystemRepresentation))
         // We always set Bit 11 in generalPurposeBitFlag, which indicates an UTF-8 encoded path.
         guard let fileNameData = path.data(using: .utf8) else { throw ArchiveError.invalidEntryPath }
 
@@ -239,8 +251,8 @@ extension Archive {
                                               lastModFileTime: modificationDateTime.1,
                                               lastModFileDate: modificationDateTime.0, crc32: checksum,
                                               compressedSize: size.compressed, uncompressedSize: size.uncompressed,
-                                              fileNameLength: UInt16(fileNameData.count), extraFieldLength: UInt16(0),
-                                              fileNameData: fileNameData, extraFieldData: Data())
+                                              fileNameLength: UInt16(fileNameLength), extraFieldLength: UInt16(extraData.count),
+                                              fileNameData: fileNameData, extraFieldData: extraData)
         _ = try Data.write(chunk: localFileHeader.data, to: self.archiveFile)
         return localFileHeader
     }
